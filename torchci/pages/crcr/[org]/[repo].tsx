@@ -121,7 +121,13 @@ function StatCard({
   );
 }
 
-function SummaryCards({ stats }: { stats: SummaryStats }) {
+function SummaryCards({
+  stats,
+  hideTotalRuns,
+}: {
+  stats: SummaryStats;
+  hideTotalRuns?: boolean;
+}) {
   const passColor =
     stats.pass_rate >= 1.0
       ? "#2e7d32"
@@ -138,19 +144,21 @@ function SummaryCards({ stats }: { stats: SummaryStats }) {
           sub={`${stats.successes}/${stats.total_jobs} jobs`}
           color={passColor}
         />
+        {!hideTotalRuns && (
+          <StatCard
+            label="Total Probe Runs"
+            value={stats.total_prs}
+            sub="unique PRs tested"
+          />
+        )}
+      </Box>
+      <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
         <StatCard
-          label="Total PRs"
-          value={stats.total_prs}
-          sub="unique PRs tested"
-        />
-        <StatCard
-          label="Failures"
+          label="Probe Fails"
           value={stats.failures}
           sub={stats.timed_out > 0 ? `+ ${stats.timed_out} timed out` : ""}
           color={stats.failures > 0 ? "#d32f2f" : undefined}
         />
-      </Box>
-      <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
         <StatCard
           label="Avg Queue Time"
           value={
@@ -254,16 +262,83 @@ function RelayHealthCard({
         borderTop: `3px solid ${borderColor}`,
         textAlign: "center",
         minWidth: 200,
+        flex: 1,
       }}
     >
       <Typography variant="caption" color="text.secondary">
-        CRCR Relay Health
+        CRCR Relay Health - PR
       </Typography>
       <Typography variant="h5" sx={{ fontWeight: 600, color: borderColor }}>
         {label}
       </Typography>
       <Typography variant="caption" color="text.secondary">
         {passedCount}/{healthPrs.length} recent PRs passed
+      </Typography>
+    </Paper>
+  );
+}
+
+function RelayHealthCardNightly({
+  nightlyData,
+}: {
+  nightlyData: CrcrJobRow[] | undefined;
+}) {
+  if (!nightlyData || nightlyData.length === 0) return null;
+
+  const shaMap = new Map<string, CrcrJobRow[]>();
+  for (const job of nightlyData) {
+    const sha = job.pytorch_head_sha;
+    if (!sha) continue;
+    const jobs = shaMap.get(sha) ?? [];
+    jobs.push(job);
+    shaMap.set(sha, jobs);
+  }
+
+  const shasByTime = Array.from(shaMap.entries())
+    .map(([sha, jobs]) => ({
+      sha,
+      jobs,
+      latestTime: Math.max(
+        ...jobs.map((j) => new Date(j.started_at).getTime())
+      ),
+    }))
+    .sort((a, b) => b.latestTime - a.latestTime)
+    .slice(0, HEALTH_COUNT);
+
+  if (shasByTime.length === 0) return null;
+
+  const allPassed = shasByTime.every((entry) =>
+    entry.jobs.every(
+      (j) => j.status === "completed" && j.conclusion === "success"
+    )
+  );
+  const passedCount = shasByTime.filter((entry) =>
+    entry.jobs.every(
+      (j) => j.status === "completed" && j.conclusion === "success"
+    )
+  ).length;
+  const borderColor = allPassed ? "#2e7d32" : "#ed6c02";
+  const label = allPassed ? "Healthy" : "Degraded";
+
+  return (
+    <Paper
+      elevation={1}
+      sx={{
+        p: 2,
+        borderTop: `3px solid ${borderColor}`,
+        textAlign: "center",
+        minWidth: 200,
+        flex: 1,
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        CRCR Relay Health - Nightly
+      </Typography>
+      <Typography variant="h5" sx={{ fontWeight: 600, color: borderColor }}>
+        {label}
+      </Typography>
+      <Typography variant="caption" color="text.secondary">
+        {passedCount}/{shasByTime.length} recent nightlies passed
       </Typography>
     </Paper>
   );
@@ -1212,14 +1287,24 @@ export default function CrcrBackendPage() {
   const stats = summaryData?.[0] ?? null;
 
   const isCrcrTest = repoFullName === "pytorch/crcr-test";
-  const healthUrl =
-    isCrcrTest && !isNightly
-      ? `/api/clickhouse/crcr_health_last_prs?parameters=${encodeURIComponent(
-          JSON.stringify({ count: String(HEALTH_COUNT) })
-        )}`
-      : null;
+  const healthUrl = isCrcrTest
+    ? `/api/clickhouse/crcr_health_last_prs?parameters=${encodeURIComponent(
+        JSON.stringify({ count: String(HEALTH_COUNT) })
+      )}`
+    : null;
   const { data: healthPrs } = useSWR<HealthPrRow[]>(
     healthUrl,
+    fetcherHandleError,
+    { refreshInterval: 60_000 }
+  );
+
+  const nightlyHealthUrl = isCrcrTest
+    ? `/api/clickhouse/crcr_nightly_dashboard?parameters=${encodeURIComponent(
+        JSON.stringify({ repo: repoFullName, days: "14" })
+      )}`
+    : null;
+  const { data: nightlyHealthData } = useSWR<CrcrJobRow[]>(
+    nightlyHealthUrl,
     fetcherHandleError,
     { refreshInterval: 60_000 }
   );
@@ -1328,9 +1413,21 @@ export default function CrcrBackendPage() {
 
             {!isNightly && (
               <>
-                {isCrcrTest && <RelayHealthCard healthPrs={healthPrs} />}
+                {isCrcrTest && (
+                  <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+                    <RelayHealthCard healthPrs={healthPrs} />
+                    <RelayHealthCardNightly nightlyData={nightlyHealthData} />
+                    {stats && (
+                      <StatCard
+                        label="Total Probe Runs"
+                        value={stats.total_prs}
+                        sub="unique PRs tested"
+                      />
+                    )}
+                  </Box>
+                )}
                 {stats ? (
-                  <SummaryCards stats={stats} />
+                  <SummaryCards stats={stats} hideTotalRuns={isCrcrTest} />
                 ) : (
                   <Skeleton variant="rectangular" height={140} />
                 )}
@@ -1344,7 +1441,15 @@ export default function CrcrBackendPage() {
             </Typography>
 
             {isNightly ? (
-              <CrcrNightlyMatrix repoFullName={repoFullName} days={days} />
+              <>
+                {isCrcrTest && (
+                  <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+                    <RelayHealthCard healthPrs={healthPrs} />
+                    <RelayHealthCardNightly nightlyData={nightlyHealthData} />
+                  </Box>
+                )}
+                <CrcrNightlyMatrix repoFullName={repoFullName} days={days} />
+              </>
             ) : (
               <CrcrMatrix
                 repoFullName={repoFullName}
