@@ -25,33 +25,16 @@ WITH eligible_matrix_keys AS (
     LIMIT {limit: UInt64} OFFSET {offset: UInt64}
 ),
 
-deduped AS (
+latest_attempts AS (
     SELECT
-        upstream_repo,
-        pytorch_head_sha,
-        workflow_name,
-        job_name,
-        check_run_id,
+        if(
+            match(pytorch_head_sha, '^[0-9a-fA-F]{40}$'),
+            concat('sha:', pytorch_head_sha),
+            concat('run:', if(run_id != '', run_id, pytorch_head_sha))
+        ) AS matrix_key,
         run_id,
-        run_attempt,
-        status,
-        conclusion,
-        started_at,
-        completed_at,
-        duration_seconds,
-        total_tests,
-        passed_tests,
-        failed_tests,
-        skipped_tests,
-        workflow_run_url,
-        artifact_url,
-        queue_time,
-        execution_time,
-        failed_tests_json,
-        ROW_NUMBER() OVER (
-            PARTITION BY pytorch_head_sha, run_id, job_name
-            ORDER BY run_attempt DESC
-        ) AS rn
+        job_name,
+        max(run_attempt) AS max_attempt
     FROM default.crcr_workflow_job FINAL
     WHERE
         downstream_repo = {repo: String}
@@ -61,6 +44,7 @@ deduped AS (
             concat('sha:', pytorch_head_sha),
             concat('run:', if(run_id != '', run_id, pytorch_head_sha))
         ) IN (SELECT matrix_key FROM eligible_matrix_keys)
+    GROUP BY matrix_key, run_id, job_name
 )
 
 SELECT
@@ -86,8 +70,26 @@ SELECT
     execution_time,
     failed_tests_json
 FROM
-    deduped
+    default.crcr_workflow_job FINAL
 WHERE
-    rn = 1
+    downstream_repo = {repo: String}
+    AND event_type = 'nightly'
+    AND (
+        if(
+            match(pytorch_head_sha, '^[0-9a-fA-F]{40}$'),
+            concat('sha:', pytorch_head_sha),
+            concat('run:', if(run_id != '', run_id, pytorch_head_sha))
+        ),
+        run_id,
+        job_name,
+        run_attempt
+    ) IN (
+        SELECT
+            matrix_key,
+            run_id,
+            job_name,
+            max_attempt
+        FROM latest_attempts
+    )
 ORDER BY
     started_at DESC
