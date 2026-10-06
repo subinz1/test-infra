@@ -45,9 +45,20 @@ describe("crcr_nightly_dashboard", () => {
     const jobsIndex = normalized.lastIndexOf("SELECT upstream_repo");
 
     expect(normalized).toContain("eligible_matrix_keys AS");
-    expect(normalized).toContain("selected_matrix_keys AS");
+    expect(normalized).toContain("status = 'completed'");
     expect(normalized).toContain(
-      "matrix_key IN (SELECT matrix_key FROM selected_matrix_keys)"
+      "completed_at >= now() - INTERVAL {days: UInt64} DAY"
+    );
+    expect(normalized).toContain("deduped AS");
+    expect(normalized).toContain("ROW_NUMBER() OVER");
+    expect(normalized).toContain(
+      "PARTITION BY pytorch_head_sha, run_id, job_name"
+    );
+    expect(normalized).toContain(
+      "matrix_key FROM eligible_matrix_keys"
+    );
+    expect(normalized).toContain(
+      "ORDER BY latest_started_at DESC, matrix_key DESC"
     );
     expect(limitIndex).toBeGreaterThan(-1);
     expect(jobsIndex).toBeGreaterThan(limitIndex);
